@@ -1,9 +1,26 @@
 import { create } from 'zustand';
 
+export interface DeviceProfile {
+  /** LDAC "Hi-Res" toggle (opcodes 0x030C/0x030D). Only verified on the original Moto Buds line. */
+  hiRes: boolean;
+}
+
+/**
+ * Per-model UI capabilities, keyed off the Bluetooth name the daemon reports.
+ * The Moto Buds 2 family (incl. Fusion) advertises LHDC rather than LDAC, so the
+ * LDAC-specific Hi-Res toggle is hidden for it until verified with the probe script.
+ */
+export function profileFor(name: string | null): DeviceProfile {
+  if (name && /buds\s*2|fusion/i.test(name)) return { hiRes: false };
+  return { hiRes: true };
+}
+
 export interface DeviceState {
   connected: boolean;
   modelId: string | null;
   name: string | null;
+  /** Bluetooth name of the auto-detected device, as reported by the daemon. Wins over guessed names. */
+  btName: string | null;
   features: number[];
   battery: {
     left: number | null;
@@ -16,6 +33,7 @@ export interface DeviceState {
     inCaseR: boolean;
   };
   ancMode: number;
+  ancSubMode: number;
   eqBands: number[];
   eqPreset: string;
   hiRes: boolean;
@@ -38,6 +56,7 @@ export interface DeviceState {
   minimizeToTray: boolean;
   
   // Actions
+  setDeviceIdentity: (btName: string) => void;
   setDevice: (data: any) => void;
   setConnected: (status: boolean) => void;
   disconnect: () => void;
@@ -60,6 +79,7 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
   connected: false,
   modelId: null,
   name: null,
+  btName: null,
   features: [],
   battery: { left: null, right: null, case: null, chargingL: false, chargingR: false, chargingCase: false, inCaseL: false, inCaseR: false },
   ancMode: 0,
@@ -85,9 +105,11 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
   setCurrentView: (view) => set({ currentView: view }),
   setReconnectStatus: (status) => set({ reconnectStatus: status }),
 
+  setDeviceIdentity: (btName) => set({ btName, name: btName }),
+
   setDevice: (data) => set({
     modelId: data.modelId,
-    name: data.name,
+    name: get().btName ?? data.name,
     features: data.features,
     battery: data.battery
   }),
@@ -98,6 +120,7 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
     connected: false,
     modelId: null,
     name: null,
+    btName: null,
     features: [],
   }),
 
@@ -113,9 +136,11 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
           if (str.toLowerCase().includes("moto buds bass")) nameStr = "Moto Buds Bass";
           else if (str.toLowerCase().includes("moto buds+")) nameStr = "Moto Buds+";
           
+          // A name reported by the daemon (the device's real Bluetooth name) always wins over these guesses.
+          const btName = get().btName;
           if (match) {
-            return { modelId: match[1], name: nameStr };
-          } else if (nameStr !== "Moto Buds") {
+            return { modelId: match[1], name: btName ?? nameStr };
+          } else if (nameStr !== "Moto Buds" && !btName) {
             return { name: nameStr };
           }
         } catch (e) {}
@@ -310,6 +335,7 @@ useDeviceStore.subscribe((state, prevState) => {
          (window as any).api.updateTrayMenu({
             battery: state.battery,
             ancMode: state.ancMode,
+            ancSubMode: state.ancSubMode,
             inEarL: state.physicallyInEarL,
             inEarR: state.physicallyInEarR
          });

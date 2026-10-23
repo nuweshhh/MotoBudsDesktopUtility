@@ -2,14 +2,14 @@ import { useDeviceStore } from '../store/useDeviceStore';
 import { useState } from 'react';
 import { Zap, Settings, Activity, Ear, MousePointerClick, CheckCircle2, EarOff, Sun, Target, X, Loader2 } from 'lucide-react';
 import budsInCase from '../assets/buds_in_case.png';
-
 export const MainDashboard = () => {
-  const { 
-    name, battery, ancMode, setAncMode, 
-    physicallyInEarL, physicallyInEarR, 
-    currentView, setCurrentView,
-    hiRes, gameMode, volBoost, reconnectStatus
-  } = useDeviceStore();
+
+const {
+  name, battery, ancMode, ancSubMode, setAncMode,
+  physicallyInEarL, physicallyInEarR,
+  currentView, setCurrentView,
+  hiRes, gameMode, volBoost, reconnectStatus
+} = useDeviceStore();
 
   const [hoveredMode, setHoveredMode] = useState<number | null>(null);
 
@@ -142,7 +142,7 @@ export const MainDashboard = () => {
           )}
           
           <div className="anc-pill-container" onMouseLeave={() => setHoveredMode(null)}>
-            <div className={`anc-pill-indicator pos-${ancMode}`} />
+            <div className={`anc-pill-indicator pos-${ancMode === 1 ? (ancSubMode === 3 ? 3 : 1) : ancMode}`} />
             
             <button 
               className={`anc-pill-btn ${ancMode === 0 ? 'active' : ''}`} 
@@ -160,24 +160,49 @@ export const MainDashboard = () => {
               <Sun size={20} />
             </button>
             
-            <button 
-              className={`anc-pill-btn ${ancMode === 1 ? 'active' : ''}`} 
+            {/* Adaptive ANC */}
+            <button
+              className={`anc-pill-btn ${ancMode === 1 && ancSubMode !== 3 ? 'active' : ''}`}
               onClick={() => setAncMode(1, 1)}
               onMouseEnter={() => setHoveredMode(1)}
+            >
+              <Target size={20} />
+            </button>
+
+            {/* Standard Noise Cancellation */}
+            <button
+              className={`anc-pill-btn ${ancMode === 1 && ancSubMode === 3 ? 'active' : ''}`}
+              onClick={() => {
+              console.log("Standard ANC clicked");
+              setAncMode(1, 3);
+            }}
+              onMouseEnter={() => setHoveredMode(3)}
             >
               <Target size={20} />
             </button>
           </div>
           
           <div className="anc-mode-text">
-            {hoveredMode !== null ? (
-              hoveredMode === 0 ? 'Off' : hoveredMode === 2 ? 'Transparency' : 'Noise Cancellation'
-            ) : (
-              (!physicallyInEarL || !physicallyInEarR) ? 'Make sure both earbuds are inserted' : (
-                ancMode === 0 ? 'Off' : ancMode === 2 ? 'Transparency' : 'Noise Cancellation'
-              )
-            )}
-          </div>
+  {hoveredMode !== null ? (
+    hoveredMode === 0
+      ? 'Off'
+      : hoveredMode === 2
+        ? 'Transparency'
+        : hoveredMode === 1
+          ? 'Adaptive ANC'
+          : 'Standard ANC'
+  ) : (
+    (!physicallyInEarL || !physicallyInEarR)
+      ? 'Make sure both earbuds are inserted'
+      : ancMode === 0
+        ? 'Off'
+        : ancMode === 2
+          ? 'Transparency'
+          : ancSubMode === 1
+            ? 'Adaptive ANC'
+            : 'Standard ANC'
+  )}
+</div>
         </div>
       </div>
 

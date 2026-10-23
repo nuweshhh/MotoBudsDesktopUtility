@@ -113,6 +113,9 @@ function App() {
        try {
           if (payload.type === 'log') {
              setLogs(prev => [...prev.slice(-4), payload.message]);
+          } else if (payload.type === 'device') {
+             // The daemon auto-detected which Moto earbuds it connected to.
+             if (payload.name) useDeviceStore.getState().setDeviceIdentity(payload.name);
           } else if (payload.type === 'event' || payload.type === 'battery' || payload.type === 'info') {
              if (payload.data) parseAndInjectPDU(payload.data);
           } else if (payload.type === 'sync') {
@@ -154,7 +157,13 @@ function App() {
     }
 
     (window as any).sendOpcodeToDevice = async (opcode: number, payload: number[]) => {
-       if (opcode === 513) await window.api.motoCommand({ op: 'anc', mode: payload[0] });
+       if (opcode === 513) {
+          await window.api.motoCommand({
+            op: 'anc',
+            mode: payload[0],
+            subMode: payload[1]
+          });
+        }
        else if (opcode === 783) await window.api.motoCommand({ op: 'game', enabled: payload[0] });
        else if (opcode === 1027) await window.api.motoCommand({ op: 'inear', enabled: payload[0] });
        else if (opcode === 788) await window.api.motoCommand({ op: 'volboost', enabled: payload[0] });
@@ -174,7 +183,7 @@ function App() {
     return (
       <div className="connect-screen">
         <img src={budsWithCase} alt="Moto Buds" className="connect-hero-image" />
-        <h1 className="connect-title">Moto Buds</h1>
+        <h1 className="connect-title">Moto Buds 2 Fusion</h1>
         <p className="connect-subtitle">{statusMsg}</p>
         
         <button 

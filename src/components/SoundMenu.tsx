@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useDeviceStore } from '../store/useDeviceStore';
+import { useDeviceStore, profileFor } from '../store/useDeviceStore';
 import { Gamepad2, Volume2, Activity, Radio, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -9,6 +9,7 @@ export const SoundMenu = () => {
   const [conflictDialog, setConflictDialog] = useState<'game' | 'hires' | null>(null);
   
   const isWindows = window.api?.isWindows;
+  const showHiRes = profileFor(name).hiRes;
 
   const handleToggleHiRes = () => {
     if (isWindows) return;
@@ -68,11 +69,12 @@ export const SoundMenu = () => {
             </div>
           )}
 
-          {/* Hi-Res Mode */}
-          <div 
+          {/* Hi-Res Mode — LDAC-specific; hidden for the Moto Buds 2 family (see profileFor) */}
+          {showHiRes && (
+          <div
             title={isWindows ? "Windows Bluetooth audio stacks generally do not support application-controlled codec switching. This feature is currently unavailable on Windows." : undefined}
           >
-            <div 
+            <div
               className="setting-row"
               style={{ opacity: isWindows ? 0.5 : 1, pointerEvents: isWindows ? 'none' : 'auto' }}
             >
@@ -90,6 +92,7 @@ export const SoundMenu = () => {
               </button>
             </div>
           </div>
+          )}
 
           {/* Gaming Mode */}
           <div className="setting-row">

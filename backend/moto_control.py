@@ -5,22 +5,174 @@ import time
 import argparse
 import sys
 import json
+import os
+import re
 import subprocess
 
-CLASSIC_MAC = "54:84:50:92:78:AE"
-RFCOMM_PORT = 16
+RFCOMM_PORT = 28
 
 HEAD = b"HEAD"
 TAIL = b"TAIL"
 
+# Custom RFCOMM service UUID used by the Moto Buds companion protocol (see PROTOCOL.md).
+MOTO_SPP_UUID = "fc9d9fe0-4899-11ee-be56-0242ac120002"
+# Bluetooth names that identify Motorola earbuds (matched case-insensitively).
+MOTO_NAME_HINTS = ("moto buds",)
+
+
+def build_packet(opcode: int, payload: bytes, ptype: int = 128) -> bytes:
+    """Frame a PDU: HEAD | len(2,LE) | opcode(2,BE) | type | result | plen(2,LE) | seq(2,LE) | payload | CRC32(LE) | TAIL."""
+    packet = bytearray()
+    packet.extend(HEAD)
+
+    total_len = 8 + len(payload)
+    packet.extend(total_len.to_bytes(2, byteorder='little'))
+
+    packet.extend(opcode.to_bytes(2, byteorder='big'))
+    packet.append(ptype)
+    packet.append(0)
+    packet.extend(len(payload).to_bytes(2, byteorder='little'))
+    packet.extend(int(0).to_bytes(2, byteorder='little'))
+
+    packet.extend(payload)
+
+    crc = binascii.crc32(packet) & 0xFFFFFFFF
+    packet.extend(struct.pack('<I', crc))
+
+    packet.extend(TAIL)
+    return bytes(packet)
+
+
+def _bluetoothctl(*args, timeout=5) -> str:
+    try:
+        return subprocess.run(["bluetoothctl", *args], capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def parse_device_list(text: str):
+    """Parse `bluetoothctl devices` output ("Device AA:BB:CC:DD:EE:FF Name") into [(mac, name)]."""
+    found = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*Device\s+([0-9A-Fa-f:]{17})\s*(.*)$", line)
+        if m:
+            found.append((m.group(1).upper(), m.group(2).strip()))
+    return found
+
+
+def score_device(name: str, info_text: str) -> int:
+    """Rank how likely a device is a Moto Buds unit. 0 means "not a candidate"."""
+    score = 0
+    if any(h in name.lower() for h in MOTO_NAME_HINTS):
+        score += 2
+    if MOTO_SPP_UUID in info_text.lower():
+        score += 4
+    if score and re.search(r"Connected:\s*yes", info_text):
+        score += 1
+    return score
+
+
+def parse_pnp_devices(json_text: str):
+    """Parse PowerShell `Get-PnpDevice -Class Bluetooth | ConvertTo-Json` output into [(mac, name)].
+
+    Classic Bluetooth devices appear as instance IDs like BTHENUM\\DEV_5484509278AE\\..., which
+    embed the MAC. ConvertTo-Json yields a bare object (not a list) when there is only one device.
+    """
+    try:
+        data = json.loads(json_text) if json_text.strip() else []
+    except ValueError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    found, seen = [], set()
+    for d in data:
+        m = re.search(r"BTHENUM\\DEV_([0-9A-Fa-f]{12})", str(d.get("InstanceId", "")), re.IGNORECASE)
+        if not m or m.group(1).upper() in seen:
+            continue
+        seen.add(m.group(1).upper())
+        raw = m.group(1).upper()
+        found.append((":".join(raw[i:i + 2] for i in range(0, 12, 2)), str(d.get("FriendlyName") or "").strip()))
+    return found
+
+
+def _windows_devices():
+    """List Bluetooth devices Windows knows about, via PowerShell (no extra Python packages needed)."""
+    cmd = ("Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | "
+           "Select-Object FriendlyName,InstanceId | ConvertTo-Json")
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            capture_output=True, text=True, timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+    except Exception:
+        return []
+    return parse_pnp_devices(out)
+
+
+def discover_device():
+    """Find the Moto Buds to talk to instead of relying on a hard-coded MAC.
+
+    Order: MOTO_BUDS_MAC env var, then the best-scoring Moto device the OS Bluetooth stack knows about
+    (BlueZ on Linux, the Windows PnP device list on Windows).
+    Returns {"mac": ..., "name": ...} or None.
+    """
+    env_mac = os.environ.get("MOTO_BUDS_MAC")
+    if env_mac:
+        return {"mac": env_mac.upper(), "name": os.environ.get("MOTO_BUDS_NAME") or "Moto Buds"}
+
+    if sys.platform == "win32":
+        # Windows exposes no per-device service UUID list here, so match on the Bluetooth name only.
+        for mac, name in _windows_devices():
+            if score_device(name, ""):
+                return {"mac": mac, "name": name}
+        return None
+
+    best = None
+    for listing in (("devices", "Connected"), ("devices", "Paired"), ("devices",)):
+        for mac, name in parse_device_list(_bluetoothctl(*listing)):
+            info = _bluetoothctl("info", mac)
+            s = score_device(name, info)
+            if s and (best is None or s > best[0]):
+                best = (s, mac, name)
+        if best:
+            break
+    return {"mac": best[1], "name": best[2]} if best else None
+
+
+def scan_rfcomm_channels(mac: str, channels=range(1, 31), timeout=2.0, log=None):
+    """Return the RFCOMM channel that answers the framed protocol, or None.
+
+    Sends only opcode 0x0000 (read firmware/profile info), so it cannot change any setting.
+    """
+    for ch in channels:
+        s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+        s.settimeout(timeout)
+        try:
+            s.connect((mac, ch))
+            s.send(build_packet(0x0000, b""))
+            data = s.recv(4096)
+            if data and HEAD in data:
+                return ch
+        except Exception as e:
+            if log:
+                log(f"[-] channel {ch}: {e}")
+        finally:
+            s.close()
+    return None
+
+
 class MotoBudsController:
-    def __init__(self, mac_address=CLASSIC_MAC, port=RFCOMM_PORT, output_json=False, is_daemon=False):
+    def __init__(self, mac_address, port=RFCOMM_PORT, output_json=False, is_daemon=False, scan_on_failure=False):
         self.mac_address = mac_address
         self.port = port
         self.sock = None
         self.output_json = output_json
         self.is_daemon = is_daemon
-        
+        # When the default channel refuses us (other Moto models may expose a different one),
+        # look for the channel that speaks the HEAD/TAIL protocol.
+        self.scan_on_failure = scan_on_failure
+
     def log(self, msg):
         if self.is_daemon:
             print(json.dumps({"type": "log", "message": msg}), flush=True)
@@ -45,6 +197,22 @@ class MotoBudsController:
                 self.log(f"[-] Connection attempt {attempt+1} failed: {e}")
                 time.sleep(0.5)
                 
+        if self.scan_on_failure and self.mac_address != "127.0.0.1":
+            self.log(f"[*] Port {self.port} did not respond; scanning RFCOMM channels...")
+            ch = scan_rfcomm_channels(self.mac_address, log=self.log)
+            if ch is not None:
+                self.log(f"[+] Protocol found on RFCOMM channel {ch}")
+                self.port = ch
+                self.sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+                self.sock.settimeout(3.0)
+                try:
+                    self.sock.connect((self.mac_address, self.port))
+                    self.log("[+] Connected successfully!")
+                    self._initialization_handshake()
+                    return True
+                except Exception as e:
+                    self.log(f"[-] Connection on channel {ch} failed: {e}")
+
         self.log("[-] Failed to connect after all attempts.")
         self.sock = None
         return False
@@ -56,25 +224,7 @@ class MotoBudsController:
             self.log("[*] Disconnected.")
 
     def _create_packet(self, opcode: int, payload: bytes) -> bytes:
-        packet = bytearray()
-        packet.extend(HEAD)
-        
-        total_len = 8 + len(payload)
-        packet.extend(total_len.to_bytes(2, byteorder='little'))
-        
-        packet.extend(opcode.to_bytes(2, byteorder='big'))
-        packet.append(128)  
-        packet.append(0)    
-        packet.extend(len(payload).to_bytes(2, byteorder='little'))
-        packet.extend(int(0).to_bytes(2, byteorder='little')) 
-        
-        packet.extend(payload)
-        
-        crc = binascii.crc32(packet) & 0xFFFFFFFF
-        packet.extend(struct.pack('<I', crc))
-        
-        packet.extend(TAIL)
-        return bytes(packet)
+        return build_packet(opcode, payload)
 
     def send_command(self, opcode: int, payload: bytes):
         if not self.sock:
@@ -234,7 +384,7 @@ def main():
     parser.add_argument("--keepalive", type=int, help="Keep SPP connection alive for N seconds to capture async events")
     parser.add_argument("--sync", action="store_true", help="Sync startup states (ANC, HiRes, Game, InEar)")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
-    parser.add_argument("--mac", type=str, default=CLASSIC_MAC, help="MAC address or 127.0.0.1 for mock")
+    parser.add_argument("--mac", type=str, default=None, help="MAC address, or 127.0.0.1 for mock. Default: auto-detect the connected Moto Buds (or set MOTO_BUDS_MAC)")
     parser.add_argument("--port", type=int, default=RFCOMM_PORT, help="Port")
     
     args = parser.parse_args()
@@ -255,20 +405,44 @@ def main():
         except Exception:
             pass
 
-    controller = MotoBudsController(mac_address=args.mac, port=args.port, output_json=args.json, is_daemon=args.daemon)
-    
+    device_name = None
+    if args.mac is None:
+        found = discover_device()
+        if not found:
+            msg = ("No Moto Buds found. Pair and connect the earbuds in your OS Bluetooth settings first "
+                   "(or pass --mac / set MOTO_BUDS_MAC).")
+            if args.daemon:
+                print(json.dumps({"type": "error", "message": msg}), flush=True)
+            elif args.json:
+                print(json.dumps({"status": "error", "message": msg}))
+            else:
+                print(msg)
+            sys.exit(1)
+        args.mac, device_name = found["mac"], found["name"]
+
+    # Linux needs the earbuds *trusted* for tap gestures / in-ear detection to work (see PROTOCOL.md).
+    if sys.platform.startswith("linux") and args.mac != "127.0.0.1":
+        _bluetoothctl("trust", args.mac)
+
+    controller = MotoBudsController(
+        mac_address=args.mac, port=args.port, output_json=args.json, is_daemon=args.daemon,
+        scan_on_failure=(args.port == RFCOMM_PORT),
+    )
+
     if args.daemon:
         if not controller.connect():
             print(json.dumps({"type": "error", "message": "Failed to connect to earbuds"}))
             sys.exit(1)
-            
+
+        if device_name:
+            print(json.dumps({"type": "device", "mac": args.mac, "name": device_name}), flush=True)
         print(json.dumps({"type": "status", "status": "connected"}), flush=True)
-        
+
         import subprocess
         if sys.platform == "linux":
             subprocess.Popen("killall -q mpris-proxy ; sleep 0.5 ; mpris-proxy &", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        
+
         import threading
         
         def stdin_listener():
@@ -279,8 +453,9 @@ def main():
                     cmd = json.loads(line)
                     op = cmd.get("op")
                     if op == "anc":
-                        sub_mode = 1 if cmd.get("mode") == 1 else 0
-                        controller.toggle_anc(cmd.get("mode"), sub_mode)
+                        mode = int(cmd.get("mode", 0))
+                        sub_mode = int(cmd.get("subMode", 0))
+                        controller.toggle_anc(mode, sub_mode)
                     elif op == "game":
                         controller.toggle_game_mode(cmd.get("enabled"))
                     elif op == "inear":

@@ -15,7 +15,7 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let minimizeToTray = false;
 let isQuitting = false;
-let trayData = { battery: { left: null, right: null, case: null, inCaseL: false, inCaseR: false }, ancMode: 0, inEarL: false, inEarR: false };
+let trayData = { battery: { left: null, right: null, case: null, inCaseL: false, inCaseR: false }, ancMode: 0, ancSubMode: 0, inEarL: false, inEarR: false };
 let pythonDaemon: any = null;
 
 
@@ -100,9 +100,30 @@ app.whenReady().then(() => {
     const contextMenu = Menu.buildFromTemplate([
       { label: batteryText, enabled: false },
       { type: 'separator' },
-      { label: 'Noise Cancellation', type: 'radio', checked: ancMode === 1, click: () => sendMotoCommand({ op: 'anc', mode: 1 }) },
-      { label: 'Transparency', type: 'radio', checked: ancMode === 2, click: () => sendMotoCommand({ op: 'anc', mode: 2 }) },
-      { label: 'Off', type: 'radio', checked: ancMode === 0, click: () => sendMotoCommand({ op: 'anc', mode: 0 }) },
+      { 
+  label: 'Adaptive ANC', 
+  type: 'radio', 
+  checked: ancMode === 1 && trayData.ancSubMode === 1, 
+  click: () => sendMotoCommand({ op: 'anc', mode: 1, subMode: 1 }) 
+},
+{ 
+  label: 'Standard ANC', 
+  type: 'radio', 
+  checked: ancMode === 1 && trayData.ancSubMode === 3, 
+  click: () => sendMotoCommand({ op: 'anc', mode: 1, subMode: 3 }) 
+},
+{ 
+  label: 'Transparency', 
+  type: 'radio', 
+  checked: ancMode === 2, 
+  click: () => sendMotoCommand({ op: 'anc', mode: 2, subMode: 0 }) 
+},
+{ 
+  label: 'Off', 
+  type: 'radio', 
+  checked: ancMode === 0, 
+  click: () => sendMotoCommand({ op: 'anc', mode: 0, subMode: 0 }) 
+},
       { type: 'separator' },
       { label: 'Open MotoBudsController', click: () => mainWindow?.show() },
       { label: 'Quit', click: () => { isQuitting = true; app.quit(); } }
@@ -132,13 +153,8 @@ app.whenReady().then(() => {
   }
 
 
-  if (process.platform === 'linux') {
-     try {
-        spawn('bluetoothctl', ['trust', '54:84:50:92:78:AE'], { stdio: 'ignore' });
-     } catch (e) {
-        console.error("Failed to trust device", e);
-     }
-  }
+  // Device trust (needed on Linux for gestures / in-ear detection) is now done by the Python
+  // daemon, against whichever Moto Buds it auto-detects, instead of a hard-coded MAC address.
 
   ipcMain.handle('start-daemon', async (event) => {
     return new Promise((resolve) => {
